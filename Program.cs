@@ -127,7 +127,7 @@ namespace PasteGuard
             sites.Text = String.Join(", ", r.sites ?? new List<string>()); enabled.Checked = r.enabled; testResult.Text = "";
             editedPatterns.Clear(); editedPatterns.AddRange(PolicyEngine.GetPatterns(r)); RefreshPatterns(0);
             sample.Clear(); UpdateSampleHint();
-            testResult.Text = "실제 자격증명 대신 테스트 문자열을 사용하세요."; testResult.ForeColor = Muted;
+            testResult.Visible = false; testResult.ForeColor = Muted;
             if (index < 0) list.ClearSelected(); else list.SelectedIndex = index;
             deleteButton.Enabled = index >= 0; loading = false; dirty = false;
             saveStatus.Text = index < 0 ? "새 규칙" : "저장된 규칙";
@@ -144,7 +144,7 @@ namespace PasteGuard
             foreach (string value in editedPatterns) patternList.Items.Add(PatternLabel(value));
             patternList.SelectedIndex = Math.Max(0, Math.Min(selected, editedPatterns.Count - 1));
             patternList.EndUpdate(); syncingPattern = false; SelectPattern();
-            patternCount.Text = "검사 패턴 " + editedPatterns.Count + "/" + PolicyEngine.MaxPatternsPerRule + " (하나라도 일치하면 차단)";
+            patternCount.Text = "검사 패턴 (" + editedPatterns.Count + "/" + PolicyEngine.MaxPatternsPerRule + ")";
             addPatternButton.Enabled = editedPatterns.Count < PolicyEngine.MaxPatternsPerRule;
             removePatternButton.Enabled = editedPatterns.Count > 1;
         }
@@ -199,6 +199,7 @@ namespace PasteGuard
         }
         void TestRule()
         {
+            testResult.Visible = true;
             if (sample.Text.Length == 0) { testResult.Text = "먼저 테스트할 문자열을 입력하세요."; return; }
             try {
                 foreach (string value in editedPatterns) PolicyEngine.MatchText("", value);
@@ -206,7 +207,7 @@ namespace PasteGuard
                 testResult.Text = match ? "차단 조건에 해당해요. 패턴 일치 또는 검사 한도 초과입니다." : "등록된 모든 패턴에 해당하지 않아요.";
                 testResult.ForeColor = match ? Accent : Muted;
             }
-            catch (ArgumentException) { testResult.Text = "검사 패턴을 확인하세요. ‘패턴 도움말’을 참고하세요."; testResult.ForeColor = Danger; }
+            catch (ArgumentException) { testResult.Text = "검사 패턴을 확인하세요. 문법은 사용 설명서를 참고하세요."; testResult.ForeColor = Danger; }
         }
         void SetRunning(bool value)
         {
