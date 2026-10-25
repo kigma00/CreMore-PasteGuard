@@ -11,12 +11,34 @@
 
 - Windows 10/11과 .NET Framework 4.8이 필요합니다.
 - 웹사이트를 보호하려면 Chrome 또는 Edge에 함께 제공되는 확장 프로그램을 설치합니다.
-- 소스에서 실행하려면 아래 [빌드](#빌드)를 따라 빌드한 뒤 `dist/PasteGuard/CreMore PasteGuard.exe`를 실행합니다.
+- 소스에서 실행하려면 아래 [빌드](#빌드)를 따라 빌드합니다. 기본 결과물은 `dist/PasteGuard/CreMore PasteGuard.exe`이며, [원하는 위치로 옮겨 실행](#실행-폴더를-옮겨도-되나요)할 수도 있습니다.
 - 실행 파일과 `CreMore PasteGuard.exe.config`, `extension` 폴더를 함께 유지하세요. `.exe.config`는 화면 배율 지원에도 사용됩니다.
 
 설치 프로그램이나 별도 서버는 필요하지 않습니다. 설정을 저장할 수 있는 폴더에서 실행하세요.
 
-`dist`는 빌드 결과를 모으는 기본 경로이며 필수 설치 위치가 아닙니다. 빌드한 `dist/PasteGuard` 폴더 전체를 쓰기 권한이 있는 원하는 위치로 옮겨 실행할 수 있습니다. 기존 설정을 유지하려면 `data` 폴더를 함께 보존하고, 설명서인 `README.md`와 `docs` 폴더도 함께 두세요.
+### 실행 폴더를 옮겨도 되나요?
+
+**`dist` 아래에서 실행할 필요는 없습니다.** `dist/PasteGuard`는 빌드 스크립트가 결과물을 모으는 기본 경로입니다. 앱을 종료한 뒤 이 폴더 전체를 쓰기 권한이 있는 원하는 위치로 옮겨 실행하세요. 예를 들어 다음처럼 배치할 수 있습니다.
+
+```text
+C:\Apps\CreMore PasteGuard\
+├─ CreMore PasteGuard.exe
+├─ CreMore PasteGuard.exe.config
+├─ extension\
+├─ README.md
+├─ docs\
+└─ data\                     # 실행 후 생성되는 사용자 설정
+```
+
+| 파일·폴더 | 옮길 때 확인할 내용 |
+|---|---|
+| `CreMore PasteGuard.exe` | 실행 파일 |
+| `CreMore PasteGuard.exe.config` | 실행 파일과 같은 폴더에 유지. 화면 배율 설정 등에 사용 |
+| `extension` | 웹 보호용 확장 프로그램. 앱의 확장 폴더 열기에서도 사용 |
+| `README.md`, `docs` | 사용 설명서와 동작 원리·관련 연구 문서 |
+| `data` | 기존 규칙과 연결 키를 유지하려면 함께 이동. 처음 실행하기 전에는 없어도 됨 |
+
+설정은 실행 파일 옆에 저장되므로 해당 폴더에 쓰기 권한이 필요합니다. 기존 확장을 이전 경로에서 불러왔다면 Chrome·Edge의 확장 관리 화면에서 새 위치의 `extension` 폴더로 다시 등록하고 연결 상태를 확인하세요. 연결 키는 Windows 사용자 계정으로 암호화되어 있으므로 다른 PC나 다른 Windows 계정으로 옮긴 경우 다시 연결해야 할 수 있습니다.
 
 ## 처음 사용하는 순서
 
@@ -162,10 +184,10 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 Windows의 .NET Framework 컴파일러를 사용하며 NuGet 패키지 설치는 필요하지 않습니다. 빌드 결과는 다음과 같습니다.
 
-- 실행 폴더: `dist/PasteGuard/`
+- 기본 출력 폴더: `dist/PasteGuard/` — 필수 설치·실행 위치가 아님
 - 배포 ZIP: `dist/CreMore-PasteGuard-windows.zip`
 
-실행 파일만 옮기지 말고 실행 폴더 전체를 함께 사용하세요. 배포 ZIP에는 사용자 설정과 연결 키가 포함되지 않습니다. 실행 파일은 서명되지 않은 개발용 파일이므로 조직의 실행 정책에 따라 차단될 수 있습니다.
+빌드 후 [실행 폴더 이동 안내](#실행-폴더를-옮겨도-되나요)에 따라 원하는 위치에서 사용할 수 있습니다. 배포 ZIP에는 사용자 설정과 연결 키가 포함되지 않습니다. 실행 파일은 서명되지 않은 개발용 파일이므로 조직의 실행 정책에 따라 차단될 수 있습니다.
 
 주요 소스는 `Program.cs`(앱 상태·저장), `Ui.cs`(화면·사용 설명서 연결), `RulePresets.cs`(기본 유형·대상), `Core.cs`(정책·패턴 검사), `WindowsGuard.cs`(Windows 보호), `Bridge.cs`(로컬 연결), `extension/`(브라우저 확장)입니다. 앱과 확장은 `127.0.0.1:17843`에서 연결 키를 확인하며 통신합니다.
 
