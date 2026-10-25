@@ -1,0 +1,17 @@
+dist/
+data/
+tests/*.exe
+tests/*.log
+*.pdb
+tests/.browser-profile/
+tests/*.png
+tests/*.dll
+/tests/uitest/
+pairing.key
+/tests/**/*.exe
+/tests/**/*.dll
+/tests/**/*.exe.config
+/tests/**/*.log
+/tests/**/*.png
+/tests/**/*.dmp
+/tests/**/layout-report.txt

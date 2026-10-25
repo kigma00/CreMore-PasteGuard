@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "CreMore PasteGuard",
+  "version": "1.2.0",
+  "description": "지정한 웹사이트에서 민감정보 패턴의 붙여넣기를 로컬에서 차단합니다.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1:17843/*"],
+  "background": { "service_worker": "background.js" },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_title": "CreMore PasteGuard", "default_popup": "popup.html", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } },
+  "options_ui": { "page": "popup.html", "open_in_tab": true },
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["matcher.js", "content.js"],
+    "run_at": "document_start",
+    "all_frames": true
+  }]
+}
