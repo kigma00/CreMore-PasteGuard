@@ -4,7 +4,9 @@ importScripts('matcher.js');
 const API = 'http://127.0.0.1:17843';
 let key = '';
 let policy = null;
+let policyJson = '';
 let lastSync = 0;
+let persistedSync = 0;
 let error = '';
 let busy = false;
 let pendingSync = false;
@@ -15,8 +17,13 @@ const ready = (async () => {
   await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   const stored = await chrome.storage.local.get(['pairingKey', 'policy', 'lastSync']);
   key = stored.pairingKey || '';
-  try { if (stored.policy) { PasteGuard.preparePolicy(stored.policy); policy = stored.policy; } } catch (_) {}
-  lastSync = stored.lastSync || 0;
+  try {
+    if (stored.policy) {
+      PasteGuard.preparePolicy(stored.policy);
+      policy = stored.policy; policyJson = JSON.stringify(policy);
+    }
+  } catch (_) {}
+  lastSync = persistedSync = stored.lastSync || 0;
 })();
 
 function status() { return { paired: !!key, policy, lastSync, error }; }
@@ -40,12 +47,20 @@ async function sync() {
       ? '연결 키를 확인하세요.' : '앱 응답 오류 (' + response.status + ')');
     const next = await response.json();
     if (key !== requestKey) return status();
-    PasteGuard.preparePolicy(next);
-    const changed = JSON.stringify(policy) !== JSON.stringify(next);
-    policy = next;
+    const nextJson = JSON.stringify(next);
+    const changed = policyJson !== nextJson;
+    if (changed) {
+      PasteGuard.preparePolicy(next);
+      policy = next; policyJson = nextJson;
+    }
     lastSync = Date.now();
     error = '';
-    await chrome.storage.local.set({ policy, lastSync });
+    // A visible popup checks every 3s, but unchanged rules need no validation,
+    // broadcast or repeated disk write. Persist freshness at the idle sync rate.
+    if (changed || lastSync - persistedSync >= 30000) {
+      await chrome.storage.local.set(changed ? { policy, lastSync } : { lastSync });
+      persistedSync = lastSync;
+    }
     if (changed) await broadcast();
   } catch (failure) {
     if (key !== requestKey) return status();
@@ -72,14 +87,14 @@ async function handle(message, sender) {
       if (next !== key) {
         key = next;
         policy = null;
-        lastSync = 0;
+        policyJson = ''; lastSync = persistedSync = 0;
         await chrome.storage.local.set({ pairingKey: key, policy: null, lastSync: 0 });
         await broadcast();
       }
       return sync();
     }
     if (message.type === 'disconnect') {
-      key = ''; policy = null; lastSync = 0; error = '';
+      key = ''; policy = null; policyJson = ''; lastSync = persistedSync = 0; error = '';
       await chrome.storage.local.remove(['pairingKey', 'policy', 'lastSync']);
       await broadcast();
       return status();

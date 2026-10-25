@@ -11,7 +11,7 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("CreMore PasteGuard")]
 [assembly: System.Reflection.AssemblyProduct("CreMore PasteGuard")]
 [assembly: System.Reflection.AssemblyDescription("앱과 웹사이트의 민감정보 붙여넣기 보호")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 
 namespace PasteGuard
@@ -55,13 +55,21 @@ namespace PasteGuard
         Policy policy;
         Bridge bridge;
         string key;
-        bool running, loading;
+        volatile bool running;
+        bool loading;
+        volatile BrowserPolicy browserPolicy;
         int editing = -1;
+
+        sealed class BrowserPolicy
+        {
+            internal readonly string Enabled, Disabled;
+            internal BrowserPolicy(string enabled, string disabled) { Enabled = enabled; Disabled = disabled; }
+        }
 
         public GuardForm()
         {
             SuspendLayout();
-            Text = "CreMore PasteGuard — 붙여넣기 보호";
+            Text = "CreMore PasteGuard";
             using (var stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("CreMore.Icon"))
             using (var source = new Icon(stream)) Icon = (Icon)source.Clone();
             ClientSize = new Size(1120, 790); MinimumSize = new Size(920, 680);
@@ -100,6 +108,7 @@ namespace PasteGuard
 
         void RefreshRules()
         {
+            PublishBrowserPolicy();
             loading = true; list.BeginUpdate(); list.Items.Clear();
             foreach (var rule in policy.rules) list.Items.Add(rule.name);
             if (policy.rules.Count > 0) list.SelectedIndex = Math.Max(0, Math.Min(editing, policy.rules.Count - 1));
@@ -171,11 +180,20 @@ namespace PasteGuard
             }
             UpdateStatus();
         }
+        void PublishBrowserPolicy()
+        {
+            // Rules change only on the UI thread. Publish immutable JSON once per
+            // saved change instead of cloning/serializing on every browser poll.
+            var snapshot = new Policy { version = policy.version, enabled = true, rules = policy.rules };
+            string enabledJson = json.Serialize(snapshot);
+            snapshot.enabled = false;
+            browserPolicy = new BrowserPolicy(enabledJson, json.Serialize(snapshot));
+        }
         string GetPolicyJson()
         {
-            string result = null;
-            OnUi(() => { var snapshot = json.Deserialize<Policy>(json.Serialize(policy)); snapshot.enabled = running && guard.IsRunning; result = json.Serialize(snapshot); }, true);
-            return result ?? "{\"version\":1,\"enabled\":false,\"rules\":[]}";
+            var snapshot = browserPolicy;
+            if (snapshot == null) return "{\"version\":1,\"enabled\":false,\"rules\":[]}";
+            return running && guard.IsRunning ? snapshot.Enabled : snapshot.Disabled;
         }
         void OnBrowserEvent(string host, string rule, string reason)
         {
@@ -192,10 +210,10 @@ namespace PasteGuard
             events.Items.Insert(0, item); if (events.Items.Count > 200) events.Items.RemoveAt(200);
             logEmpty.Visible = false;
         }
-        void OnUi(Action action, bool wait = false)
+        void OnUi(Action action)
         {
             if (IsDisposed || !IsHandleCreated) return;
-            if (!InvokeRequired) action(); else if (wait) Invoke(action); else BeginInvoke(action);
+            if (!InvokeRequired) action(); else BeginInvoke(action);
         }
         Policy LoadPolicy()
         {

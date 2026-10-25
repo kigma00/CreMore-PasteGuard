@@ -27,6 +27,8 @@ namespace PasteGuard
         private readonly SynchronizationContext context = SynchronizationContext.Current;
         private readonly AutoResetEvent refresh = new AutoResetEvent(false);
         private readonly HashSet<int> suppressedKeys = new HashSet<int>();
+        private readonly StringBuilder processPath = new StringBuilder(260);
+        private static readonly string[] NoRules = new string[0];
         private readonly object lifecycle = new object();
         private volatile State state = new State(new Policy());
         private volatile bool running, disposed;
@@ -200,7 +202,8 @@ namespace PasteGuard
             bool down = kind == 0x0100 || kind == 0x0104;
             if (up && suppressedKeys.Remove(key)) return new IntPtr(1);
             if (down && suppressedKeys.Contains(key)) return new IntPtr(1);
-            if (!down || !running) return CallNextHookEx(hookHandle, code, message, data);
+            if (!down || !running || (key != 0x56 && key != 0x2D))
+                return CallNextHookEx(hookHandle, code, message, data);
             bool paste = !IsDown(0x12) && !IsDown(0x5B) && !IsDown(0x5C)
                 && ((key == 0x56 && IsDown(0x11)) || (key == 0x2D && IsDown(0x10)));
             if (!paste) return CallNextHookEx(hookHandle, code, message, data);
@@ -211,7 +214,7 @@ namespace PasteGuard
             if (process == null || !current.Targets.Contains(process)) return CallNextHookEx(hookHandle, code, message, data);
             Cache cache = current.Cache;
             string reason = null;
-            string[] names = new string[0];
+            string[] names = NoRules;
             if (cache == null || cache.Sequence != GetClipboardSequenceNumber())
             {
                 reason = "Clipboard inspection is not ready. Try again shortly.";
@@ -221,7 +224,7 @@ namespace PasteGuard
             else if (cache.Matches.TryGetValue(process, out names) && names.Length != 0) reason = "Clipboard text matched a rule or exceeded its inspection budget.";
             if (reason == null) return CallNextHookEx(hookHandle, code, message, data);
             suppressedKeys.Add(key);
-            Notify(new BlockEvent { TimeUtc = DateTime.UtcNow, ProcessName = process, Reason = reason, RuleNames = names ?? new string[0] });
+            Notify(new BlockEvent { TimeUtc = DateTime.UtcNow, ProcessName = process, Reason = reason, RuleNames = names ?? NoRules });
             return new IntPtr(1);
         }
 
@@ -252,6 +255,10 @@ namespace PasteGuard
                     if (!running) continue;
                     State current = state;
                     if (current.Targets.Count == 0) continue;
+                    Cache previous = current.Cache;
+                    // Clipboard notifications can coalesce or repeat. Retry failures,
+                    // but don't inspect an unchanged, already completed snapshot again.
+                    if (previous != null && !previous.Retry && previous.Sequence == GetClipboardSequenceNumber()) continue;
                     Cache cache = new Cache();
                     string text = null;
                     try
@@ -325,7 +332,7 @@ namespace PasteGuard
 
         private static bool IsDown(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
 
-        private static string ForegroundProcess()
+        private string ForegroundProcess()
         {
             uint pid;
             GetWindowThreadProcessId(GetForegroundWindow(), out pid);
@@ -334,9 +341,21 @@ namespace PasteGuard
             if (process == IntPtr.Zero) return null;
             try
             {
-                StringBuilder path = new StringBuilder(32768);
-                int length = path.Capacity;
-                return QueryFullProcessImageName(process, 0, path, ref length) ? Path.GetFileName(path.ToString()) : null;
+                // Only the hook thread uses this buffer. Grow for long paths without
+                // allocating a 64 KiB buffer on every paste or caching a stale PID.
+                while (true)
+                {
+                    processPath.Length = 0;
+                    int length = processPath.Capacity;
+                    if (QueryFullProcessImageName(process, 0, processPath, ref length))
+                    {
+                        int start = length;
+                        while (start > 0 && processPath[start - 1] != '\\' && processPath[start - 1] != '/') start--;
+                        return processPath.ToString(start, length - start);
+                    }
+                    if (Marshal.GetLastWin32Error() != 122 || processPath.Capacity >= 32768) return null;
+                    processPath.Capacity = Math.Min(processPath.Capacity * 2, 32768);
+                }
             }
             finally { CloseHandle(process); }
         }
@@ -358,7 +377,7 @@ namespace PasteGuard
         [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, int message, IntPtr wparam, IntPtr lparam);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string module);
         [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder name, ref int size);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder name, ref int size);
         [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
         [DllImport("kernel32.dll")] private static extern UIntPtr GlobalSize(IntPtr handle);
         [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr handle);

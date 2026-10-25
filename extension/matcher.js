@@ -3,6 +3,8 @@
   'use strict';
   const limits = Object.freeze({ pattern: 512, repeat: 256, states: 2048, text: 65536, steps: 8000000 });
   const cache = new Map();
+  // Matching is synchronous. Reuse bounded scratch space; it never contains pasted text.
+  let scratchA = new Uint8Array(0), scratchB = new Uint8Array(0);
   const letter = c => c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z';
   const digit = c => c >= '0' && c <= '9';
   const wordAt = (text, i) => i >= 0 && i < text.length && (letter(text[i]) || digit(text[i]) || text[i] === '_');
@@ -101,11 +103,32 @@
   function evaluate(nodes, text, budget) {
     text = text == null ? '' : String(text);
     if (text.length > limits.text) return { matched: true, limited: true };
-    let current = new Uint8Array(nodes.length + 1), next = new Uint8Array(nodes.length + 1);
+    const size = nodes.length + 1;
+    if (scratchA.length < size) {
+      scratchA = new Uint8Array(size); scratchB = new Uint8Array(size);
+    } else {
+      scratchA.fill(0, 0, size); scratchB.fill(0, 0, size);
+    }
+    let current = scratchA, next = scratchB;
     const counter = budget || { steps: 0 };
     let high = 0;
+    const first = nodes[0];
+    const firstLiteral = first?.kind === 'atom' && !first.atom.negate
+      && first.atom.ranges.length === 2 && first.atom.ranges[0] === first.atom.ranges[1]
+      ? String.fromCharCode(first.atom.ranges[0]) : null;
     const exceeded = () => ({ matched: true, limited: true });
     for (let position = 0; position <= text.length; position++) {
+      // With no active partial match, missing starting characters cannot match.
+      // Charge the same three NFA steps per skipped UTF-16 character so the
+      // shared fail-closed inspection budget stays identical to the slow path.
+      if (high === 0 && firstLiteral !== null && position < text.length) {
+        const found = text.indexOf(firstLiteral, position);
+        const destination = found < 0 ? text.length : found;
+        const cost = (destination - position) * 3;
+        if (cost > limits.steps - counter.steps) { counter.steps = limits.steps + 1; return exceeded(); }
+        counter.steps += cost;
+        position = destination;
+      }
       current[0] = 1;
       for (let i = 0; i <= high && i < nodes.length; i++) {
         if (++counter.steps > limits.steps) return exceeded();
@@ -120,7 +143,7 @@
       }
       if (current[nodes.length]) return { matched: true, limited: false };
       if (position === text.length) return { matched: false, limited: false };
-      next.fill(0);
+      next.fill(0, 0, size);
       let nextHigh = 0;
       for (let i = 0; i <= high && i < nodes.length; i++) {
         if (++counter.steps > limits.steps) return exceeded();
@@ -167,7 +190,9 @@
   }
   function siteMatches(scope, host) {
     if (!host || !validSite(scope)) return false;
-    const target = scope.toLowerCase();
+    return matchesHost(scope.toLowerCase(), host);
+  }
+  function matchesHost(target, host) {
     return target.startsWith('*.') ? host.length > target.length - 1 && host.endsWith(target.slice(1)) : host === target;
   }
   function preparePolicy(policy) {
@@ -181,16 +206,17 @@
         || rule.processes.length > 128 || rule.sites.length > 128 || !rule.processes.length && !rule.sites.length
         || !rule.processes.every(validProcess) || !rule.sites.every(validSite)) bad('규칙의 이름 또는 대상 형식이 잘못되었습니다.');
       ids.add(rule.id);
-      return { ...rule, nodes: compile(rule.pattern) };
+      return { ...rule, nodes: compile(rule.pattern), targets: rule.sites.map(scope => scope.toLowerCase()) };
     });
     return { enabled: policy.enabled, rules };
   }
   function decidePaste(prepared, url, text) {
     if (!prepared || !prepared.enabled) return { block: false };
     const host = urlHost(url);
+    if (!host) return { block: false };
     const budget = { steps: 0 };
     for (const rule of prepared.rules) {
-      if (!rule.enabled || !rule.sites.some(scope => siteMatches(scope, host))) continue;
+      if (!rule.enabled || !rule.targets.some(target => matchesHost(target, host))) continue;
       const result = evaluate(rule.nodes, text, budget);
       if (result.matched) return { block: true, rule, reason: result.limited ? 'limit' : 'pattern' };
     }

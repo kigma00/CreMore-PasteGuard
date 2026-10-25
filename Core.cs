@@ -30,6 +30,9 @@ namespace PasteGuard
         public const int MaxEvaluationSteps = 8000000;
         private static readonly Dictionary<string, List<Node>> cache = new Dictionary<string, List<Node>>(StringComparer.Ordinal);
         private static readonly Queue<string> cacheOrder = new Queue<string>();
+        [ThreadStatic] private static bool[] scratchCurrent;
+        [ThreadStatic] private static bool[] scratchNext;
+        private static readonly char[] InvalidProcessCharacters = "<>:\"/\\|?*".ToCharArray();
 
         public static List<string> Validate(Policy policy)
         {
@@ -61,7 +64,7 @@ namespace PasteGuard
                     foreach (string site in rule.sites)
                         if (!ValidSite(site)) errors.Add(prefix + "Use a hostname or *.hostname without paths or ports.");
                 }
-                try { Compile(rule.pattern); }
+                try { CachedCompile(rule.pattern); }
                 catch (ArgumentException error) { errors.Add(prefix + error.Message); }
             }
             return errors;
@@ -120,14 +123,35 @@ namespace PasteGuard
             List<Node> nodes = CachedCompile(pattern);
             text = text ?? "";
             if (text.Length > MaxTextLength) return true;
-            var current = new bool[nodes.Count + 1];
-            var next = new bool[nodes.Count + 1];
+            int count = nodes.Count;
+            // Reuse bounded, thread-local state flags; no inspected text is cached.
+            if (scratchCurrent == null || scratchCurrent.Length < count + 1)
+            {
+                scratchCurrent = new bool[count + 1];
+                scratchNext = new bool[count + 1];
+            }
+            bool[] current = scratchCurrent, next = scratchNext;
+            Array.Clear(current, 0, count + 1);
+            Array.Clear(next, 0, count + 1);
+            Atom first = count > 0 && nodes[0].kind == Kind.Atom ? nodes[0].atom : null;
+            bool literalStart = first != null && !first.negate && first.ranges.Count == 2 && first.ranges[0] == first.ranges[1];
+            char firstCharacter = literalStart ? (char)first.ranges[0] : '\0';
             int steps = 0;
-            int high = 0;
+            int high = 0, clearLength = 0;
             for (int position = 0; position <= text.Length; position++)
             {
+                if (literalStart && high == 0 && position < text.Length && text[position] != firstCharacter)
+                {
+                    int found = text.IndexOf(firstCharacter, position);
+                    int end = found < 0 ? text.Length : found;
+                    // Each skipped mismatch costs exactly the previous two state
+                    // visits plus one literal comparison, preserving the budget.
+                    steps += (end - position) * 3;
+                    if (steps > MaxEvaluationSteps) return true;
+                    position = end;
+                }
                 current[0] = true; // Unanchored search starts at every position.
-                for (int i = 0; i <= high && i < nodes.Count; i++)
+                for (int i = 0; i <= high && i < count; i++)
                 {
                     if (++steps > MaxEvaluationSteps) return true;
                     if (!current[i]) continue;
@@ -138,11 +162,11 @@ namespace PasteGuard
                         || (node.kind == Kind.Boundary && WordAt(text, position - 1) != WordAt(text, position)))
                     { current[i + 1] = true; if (i + 1 > high) high = i + 1; }
                 }
-                if (current[nodes.Count]) return true;
+                if (current[count]) return true;
                 if (position == text.Length) return false;
-                Array.Clear(next, 0, next.Length);
+                Array.Clear(next, 0, clearLength);
                 int nextHigh = 0;
-                for (int i = 0; i <= high && i < nodes.Count; i++)
+                for (int i = 0; i <= high && i < count; i++)
                 {
                     if (++steps > MaxEvaluationSteps) return true;
                     Node node = nodes[i];
@@ -155,6 +179,7 @@ namespace PasteGuard
                     if (steps > MaxEvaluationSteps) return true;
                 }
                 bool[] swap = current; current = next; next = swap;
+                clearLength = high + 1;
                 high = nextHigh;
             }
             return false;
@@ -164,7 +189,7 @@ namespace PasteGuard
         {
             if (String.IsNullOrWhiteSpace(value) || value.Length > 260 || value != value.Trim()
                 || !value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                || value.Length == 4 || value.IndexOfAny("<>:\"/\\|?*".ToCharArray()) >= 0) return false;
+                || value.Length == 4 || value.IndexOfAny(InvalidProcessCharacters) >= 0) return false;
             foreach (char c in value) if (Char.IsControl(c)) return false;
             return true;
         }

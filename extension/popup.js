@@ -39,7 +39,10 @@ $('pair-form').addEventListener('submit', event => { event.preventDefault(); act
 $('refresh').addEventListener('click', () => act({ type: 'sync' }));
 $('disconnect').addEventListener('click', () => act({ type: 'disconnect' }));
 act({ type: 'status' });
-setInterval(() => act({ type: 'sync' }), 3000);
+// The options page may stay open in a background tab; the worker's 30s alarm
+// already keeps protection current there without extra 3s sync requests.
+setInterval(() => { if (!document.hidden) act({ type: 'sync' }); }, 3000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) act({ type: 'sync' }); });
 chrome.tabs.query({ active: true, currentWindow: true }).then(async tabs => {
   try {
     const frame = await chrome.tabs.sendMessage(tabs[0].id, { type: 'frameStatus' }, { frameId: 0 });

@@ -40,6 +40,18 @@ for (const pattern of [null, '', '.', 'a|b', '(a)', '(?:a)', '(?=a)', '(?<=a)', 
 }
 match('x'.repeat(engine.limits.text), 'PGTEST_[A-Z0-9]{16}', false);
 match('x'.repeat(engine.limits.text + 1), 'absent', true);
+// Fast literal rejection must charge the same budget and leave no scratch state
+// from a preceding larger/different expression.
+let exactBudget = { steps: engine.limits.steps - 22 };
+check(!engine.evaluate(engine.compile('z'), 'xxxxxxx', exactBudget).matched
+  && exactBudget.steps === engine.limits.steps, 'literal skip preserves exact budget boundary');
+exactBudget = { steps: engine.limits.steps - 21 };
+check(engine.evaluate(engine.compile('z'), 'xxxxxxx', exactBudget).limited, 'literal skip fails closed one step past budget');
+match('a'.repeat(256), '^a{256}$', true);
+match('x', 'z', false);
+match('prefix PGTEST_ABCD1234EFGH5678', 'PGTEST_[A-Z0-9]{16}', true);
+match('x'.repeat(128), '^a{256}$', false);
+match('', '^$', true);
 let began = Date.now();
 check(engine.evaluate(engine.compile('a*'.repeat(64) + 'b'), 'a'.repeat(engine.limits.text)).limited, 'NFA step cap fails closed');
 check(Date.now() - began < 10000, 'adversarial matching stays bounded');
@@ -130,9 +142,10 @@ async function runAsyncTests() {
 
   let bridgePolicy = policy(), bridgeError = false, receiver;
   const requests = [], stored = { pairingKey: 'a'.repeat(32), policy: policy(), lastSync: 1 }, broadcasts = [];
-  let accessLevel;
-  const background = vm.createContext({ URL, AbortSignal, Date, Promise, console,
-    importScripts() { background.PasteGuard = engine; },
+  let accessLevel, storageWrites = 0, validations = 0, lastWriteKeys = [], now = Date.now();
+  class Clock extends Date { static now() { return now; } }
+  const background = vm.createContext({ URL, AbortSignal, Date: Clock, Promise, console,
+    importScripts() { background.PasteGuard = { ...engine, preparePolicy(data) { validations++; return engine.preparePolicy(data); } }; },
     fetch: async (url, options) => {
       requests.push({ url, options });
       if (bridgeError) throw new TypeError('offline');
@@ -142,7 +155,7 @@ async function runAsyncTests() {
       storage: { local: {
         async setAccessLevel(options) { accessLevel = options.accessLevel; },
         async get() { return { ...stored }; },
-        async set(values) { Object.assign(stored, values); },
+        async set(values) { storageWrites++; lastWriteKeys = Object.keys(values); Object.assign(stored, values); },
         async remove(keys) { for (const key of keys) delete stored[key]; }
       } },
       tabs: { async query() { return [{ id: 1 }]; }, async sendMessage(id, message) { broadcasts.push(message); } },
@@ -158,6 +171,19 @@ async function runAsyncTests() {
   check(state.paired && state.policy.enabled && state.lastSync > 1, 'background loads and syncs policy');
   check(!JSON.stringify(state).includes('a'.repeat(32)), 'UI status excludes pairing secret');
   check(requests[0].url === 'http://127.0.0.1:17843/policy' && requests[0].options.headers['X-PasteGuard-Key'] === 'a'.repeat(32), 'authenticated loopback-only policy fetch');
+  const initialWrites = storageWrites, initialValidations = validations, initialBroadcasts = broadcasts.length;
+  await call({ type: 'sync' });
+  check(storageWrites === initialWrites && validations === initialValidations && broadcasts.length === initialBroadcasts,
+    'unchanged popup refresh avoids validation, disk writes and broadcast');
+  now += 30001; await call({ type: 'sync' });
+  check(storageWrites === initialWrites + 1 && lastWriteKeys.join() === 'lastSync'
+    && validations === initialValidations && broadcasts.length === initialBroadcasts,
+    'unchanged 30s refresh persists timestamp only without rewriting policy');
+  bridgePolicy = policy(); bridgePolicy.enabled = false;
+  await call({ type: 'sync' });
+  check(storageWrites > initialWrites && validations > initialValidations && broadcasts.at(-1).policy.enabled === false,
+    'changed policy is validated, stored and broadcast immediately');
+  bridgePolicy = policy(); await call({ type: 'sync' });
   const sender = { tab: { id: 1 }, url: 'https://app.slack.com/private?token=' + token };
   await call({ type: 'blocked', rule: 'Demo token', text: token, url: sender.url }, sender);
   const eventRequest = requests.find(r => r.url.endsWith('/events'));
@@ -180,6 +206,26 @@ async function runAsyncTests() {
   check(invalid.policy.rules[0].pattern === 'PGTEST_[A-Z0-9]{16}' && !!invalid.error, 'invalid bridge policy preserves verified cache');
   await call({ type: 'disconnect' }, { tab: { id: 2 }, url: 'chrome-extension://unit-test/popup.html' });
   check(!stored.pairingKey && !stored.policy && broadcasts.at(-1).policy === null, 'options tab disconnect removes policy and secret');
+  let popupTimer, visibilityChanged;
+  const popupMessages = [], controls = new Map();
+  const popupDocument = { hidden: true,
+    getElementById(id) {
+      if (!controls.has(id)) controls.set(id, { addEventListener() {}, replaceChildren() {}, value: '' });
+      return controls.get(id);
+    },
+    addEventListener(type, handler) { if (type === 'visibilitychange') visibilityChanged = handler; }
+  };
+  const popup = vm.createContext({ document: popupDocument, Date, setInterval(handler) { popupTimer = handler; },
+    chrome: { runtime: { async sendMessage(message) { popupMessages.push(message); return { paired: false, policy: null }; } },
+      tabs: { async query() { return []; } } }
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/popup.js'), 'utf8'), popup);
+  await tick(); popupTimer(); await tick();
+  check(!popupMessages.some(message => message.type === 'sync'), 'hidden options tab avoids 3s polling');
+  popupDocument.hidden = false; visibilityChanged(); await tick();
+  check(popupMessages.filter(message => message.type === 'sync').length === 1, 'returning to options refreshes immediately');
+  popupTimer(); await tick();
+  check(popupMessages.filter(message => message.type === 'sync').length === 2, 'visible popup retains fast policy refresh');
   console.log('PASS: ' + checks + ' extension matcher, scope, paste-event and privacy checks.');
 }
 runAsyncTests().catch(error => { console.error(error); process.exitCode = 1; });

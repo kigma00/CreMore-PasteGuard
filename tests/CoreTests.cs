@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.Web.Script.Serialization;
 using PasteGuard;
 
@@ -99,6 +100,40 @@ internal static class CoreTests
             Match(new string('a', PolicyEngine.MaxTextLength), adversarial + "b", true, "operation budget fails closed");
             Check(timer.ElapsedMilliseconds < 10000, "adversarial matching completes within bounded time");
             for (int i = 0; i < 150; i++) Match("cache" + i, "cache" + i, true, "bounded cache eviction");
+            // Reused state buffers must not retain accepting states after an early
+            // return, a smaller pattern, or an empty match.
+            for (int i = 0; i < 20; i++)
+            {
+                Match(new string('a', 256), "^a{256}$", true, "large buffer match");
+                Match("a", "b", false, "shorter pattern clears old state");
+                Match("", "a{0}", true, "empty compiled pattern");
+                Match("PPPGTEST_ABCD1234EFGH5678", "PGTEST_[A-Z0-9]{16}", true, "overlapping literal prefix");
+                Match("PGTEST_ABCD1234EFGH5678", "PGTEST_[A-Z0-9]{17}", false, "prior accepting state cleared");
+            }
+            var workers = new Thread[4];
+            var failures = new Exception[workers.Length];
+            for (int i = 0; i < workers.Length; i++)
+            {
+                int worker = i;
+                workers[i] = new Thread(delegate()
+                {
+                    try
+                    {
+                        string ownText = new string((char)('a' + worker), 128);
+                        string ownPattern = "^" + (char)('a' + worker) + "{128}$";
+                        for (int iteration = 0; iteration < 200; iteration++)
+                            if (!PolicyEngine.MatchText(ownText, ownPattern) || PolicyEngine.MatchText("x", ownPattern))
+                                throw new Exception("Concurrent matcher state leaked between threads.");
+                    }
+                    catch (Exception error) { failures[worker] = error; }
+                });
+                workers[i].Start();
+            }
+            for (int i = 0; i < workers.Length; i++)
+            {
+                Check(workers[i].Join(10000), "concurrent matcher completes");
+                Check(failures[i] == null, "thread-local matcher workspace");
+            }
 
             Rule rule = ExampleRule();
             Check(PolicyEngine.TargetProcess(rule, "slack.EXE"), "case insensitive executable");

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 using PasteGuard;
@@ -41,6 +42,21 @@ static class UiFlowTests
             CheckBox enabled = Field<CheckBox>(form, "enabled");
             string keyBefore = Field<string>(form, "key");
             byte[] storedKeyBefore = File.ReadAllBytes(Path.Combine(baseDir, "data", "pairing.key"));
+            var readPolicy = (Func<string>)Delegate.CreateDelegate(typeof(Func<string>), form,
+                typeof(GuardForm).GetMethod("GetPolicyJson", Private));
+            string emptyPolicy = readPolicy();
+            Check(Object.ReferenceEquals(emptyPolicy, readPolicy()), "Unchanged browser polls reuse immutable JSON.");
+            var initialBrowserPolicy = new JavaScriptSerializer().Deserialize<Policy>(emptyPolicy);
+            Check(!initialBrowserPolicy.enabled && initialBrowserPolicy.rules.Count == 0,
+                "Browser protection starts disabled with an empty saved policy.");
+            string workerPolicy = null;
+            var reader = new Thread(() => workerPolicy = readPolicy());
+            reader.IsBackground = true; reader.Start();
+            Check(reader.Join(1000) && workerPolicy == emptyPolicy,
+                "Browser policy reads complete without waiting for the UI message loop.");
+            typeof(GuardForm).GetField("running", Private).SetValue(form, true);
+            Check(readPolicy() == emptyPolicy, "A stopped keyboard guard cannot publish enabled browser protection.");
+            typeof(GuardForm).GetField("running", Private).SetValue(form, false);
 
             Check(!Field<bool>(form, "dirty"), "Loading the empty first-run editor is clean.");
             Check(!Field<bool>(form, "running"), "No protection hooks were requested.");
@@ -71,6 +87,10 @@ static class UiFlowTests
             Check((bool)Call(form, "SaveRule"), "The first explicit rule saves successfully.");
             Check(Field<Policy>(form, "policy").rules.Count == 1 && list.SelectedIndex == 0,
                 "Saving the first rule selects it.");
+            string firstSavedPolicy = readPolicy();
+            Check(!Object.ReferenceEquals(firstSavedPolicy, emptyPolicy)
+                && new JavaScriptSerializer().Deserialize<Policy>(firstSavedPolicy).rules.Count == 1,
+                "Saving publishes the new browser rule snapshot.");
 
             // Save an existing rule with a custom pattern and hand-written targets.
             string initialId = Field<Policy>(form, "policy").rules[0].id;
@@ -81,12 +101,17 @@ static class UiFlowTests
             pattern.Text = "INTERNAL_[A-Z]{8}";
             enabled.Checked = false;
             Check(Field<bool>(form, "dirty"), "Editing a rule marks changes unsaved.");
+            Check(Object.ReferenceEquals(firstSavedPolicy, readPolicy()),
+                "Unsaved editor changes do not alter the published browser policy.");
             Check((bool)Call(form, "SaveRule"), "Existing rule saves successfully.");
             Policy policy = Field<Policy>(form, "policy");
             Check(policy.rules[0].id == initialId, "Saving preserves the existing rule ID.");
             Check(policy.rules[0].pattern == "INTERNAL_[A-Z]{8}", "Saving preserves the custom pattern.");
             Check(!policy.rules[0].enabled, "Saving preserves the disabled state.");
             Check(!Field<bool>(form, "dirty"), "Successful save clears unsaved state.");
+            var changedBrowserPolicy = new JavaScriptSerializer().Deserialize<Policy>(readPolicy());
+            Check(changedBrowserPolicy.rules[0].pattern == "INTERNAL_[A-Z]{8}" && !changedBrowserPolicy.rules[0].enabled,
+                "The next published policy includes saved pattern and rule-enabled changes.");
 
             // A fresh save must keep the newly added rule selected.
             Call(form, "EditRule", -1);
@@ -168,7 +193,7 @@ static class UiFlowTests
             // does not raise FormClosed and therefore does not run its handlers.
             if (form != null)
             {
-                Field<Timer>(form, "timer").Dispose();
+                Field<System.Windows.Forms.Timer>(form, "timer").Dispose();
                 var bridge = Field<Bridge>(form, "bridge");
                 if (bridge != null) bridge.Dispose();
                 Field<WindowsGuard>(form, "guard").Dispose();
