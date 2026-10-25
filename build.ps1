@@ -10,6 +10,7 @@ $sources = 'Program.cs', 'Ui.cs', 'RulePresets.cs', 'Core.cs', 'WindowsGuard.cs'
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 Copy-Item -LiteralPath (Join-Path $projectDir 'PasteGuard.exe.config') -Destination (Join-Path $outputDir "$appName.config") -Force
 Copy-Item -LiteralPath (Join-Path $projectDir 'README.md') -Destination $outputDir -Force
+Copy-Item -LiteralPath (Join-Path $projectDir 'docs') -Destination $outputDir -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $projectDir 'extension') -Destination $outputDir -Recurse -Force
-Compress-Archive -LiteralPath (Join-Path $outputDir $appName),(Join-Path $outputDir "$appName.config"),(Join-Path $outputDir 'README.md'),(Join-Path $outputDir 'extension') -DestinationPath (Join-Path $projectDir 'dist\CreMore-PasteGuard-windows.zip') -Force
+Compress-Archive -LiteralPath (Join-Path $outputDir $appName),(Join-Path $outputDir "$appName.config"),(Join-Path $outputDir 'README.md'),(Join-Path $outputDir 'docs'),(Join-Path $outputDir 'extension') -DestinationPath (Join-Path $projectDir 'dist\CreMore-PasteGuard-windows.zip') -Force
 Write-Output "Built: $outputDir\$appName"
