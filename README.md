@@ -7,6 +7,20 @@
 - [설정 후 실제 동작 원리](docs/how-it-works.md): Windows 앱과 웹의 검사·차단 흐름, 기록과 예외 상황
 - [관련 논문과 기존 기능 비교](docs/related-work.md): 유사 연구의 공통점·차이점과 평가 방향
 
+## 메모장 붙여넣기 차단 PoC
+
+[![메모장에서 가짜 자격증명 붙여넣기를 차단하는 실제 시연](media/pasteguard-notepad-poc.png)](https://github.com/kigma00/CreMore-PasteGuard/blob/main/media/pasteguard-notepad-poc.mp4)
+
+[PoC 영상 보기](https://github.com/kigma00/CreMore-PasteGuard/blob/main/media/pasteguard-notepad-poc.mp4)
+
+CreMore PasteGuard 1.2.1에서 `notepad.exe`를 대상으로 `ghg_[A-Za-z0-9]+` 패턴을 설정한 실제 Windows 화면 녹화입니다. 대기 구간을 줄이고 설명 자막을 추가했습니다. 영상에는 테스트용 가짜 문자열 `ghg_PASTEGUARDDEMO20261025ABC123`만 사용하며, 실제 자격증명은 포함하지 않습니다.
+
+- 가짜 문자열의 `Ctrl+V`와 `Shift+Insert` 붙여넣기 차단
+- 일반 문장 `PasteGuard demo: ordinary text is allowed.`의 붙여넣기 허용
+- PasteGuard에서 대상 앱·규칙·차단 기록 확인
+
+이 시연은 Windows 메모장의 두 붙여넣기 단축키를 검증합니다. 우클릭 메뉴, 직접 입력, 파일 업로드 등은 [보호 범위와 한계](#보호-범위와-한계)를 확인하세요.
+
 ## 실행 준비
 
 - Windows 10/11과 .NET Framework 4.8이 필요합니다.
