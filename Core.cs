@@ -5,7 +5,7 @@ namespace PasteGuard
 {
     public sealed class Policy
     {
-        public int version = 1;
+        public int version = 2;
         public bool enabled = true;
         public List<Rule> rules = new List<Rule>();
     }
@@ -18,6 +18,7 @@ namespace PasteGuard
         public List<string> processes = new List<string>();
         public List<string> sites = new List<string>();
         public string pattern;
+        public List<string> patterns; // Null preserves version 1's single-pattern rules.
     }
 
     // Deliberately does not use System.Text.RegularExpressions for user input.
@@ -28,6 +29,8 @@ namespace PasteGuard
         public const int MaxStates = 2048;
         public const int MaxTextLength = 65536;
         public const int MaxEvaluationSteps = 8000000;
+        public const int MaxPatternsPerRule = 16;
+        public const int MaxPatternsPerPolicy = 100;
         private static readonly Dictionary<string, List<Node>> cache = new Dictionary<string, List<Node>>(StringComparer.Ordinal);
         private static readonly Queue<string> cacheOrder = new Queue<string>();
         [ThreadStatic] private static bool[] scratchCurrent;
@@ -38,10 +41,11 @@ namespace PasteGuard
         {
             var errors = new List<string>();
             if (policy == null) { errors.Add("Policy is missing."); return errors; }
-            if (policy.version != 1) errors.Add("Only policy version 1 is supported.");
+            if (policy.version != 1 && policy.version != 2) errors.Add("Only policy versions 1 and 2 are supported.");
             if (policy.rules == null || policy.rules.Count > 100)
             { errors.Add("Rules must be a list of at most 100 entries."); return errors; }
             var ids = new HashSet<string>(StringComparer.Ordinal);
+            int patternCount = 0;
             for (int i = 0; i < policy.rules.Count; i++)
             {
                 Rule rule = policy.rules[i];
@@ -64,10 +68,39 @@ namespace PasteGuard
                     foreach (string site in rule.sites)
                         if (!ValidSite(site)) errors.Add(prefix + "Use a hostname or *.hostname without paths or ports.");
                 }
-                try { CachedCompile(rule.pattern); }
-                catch (ArgumentException error) { errors.Add(prefix + error.Message); }
+                if (policy.version == 1 && rule.patterns != null)
+                    errors.Add(prefix + "Multiple-pattern rules require policy version 2.");
+                IList<string> patterns = GetPatterns(rule);
+                if (patterns.Count == 0 || patterns.Count > MaxPatternsPerRule)
+                { errors.Add(prefix + "Use 1 to 16 patterns per rule."); continue; }
+                patternCount += patterns.Count;
+                if (patternCount > MaxPatternsPerPolicy) continue;
+                for (int p = 0; p < patterns.Count; p++)
+                {
+                    try { CachedCompile(patterns[p]); }
+                    catch (ArgumentException error) { errors.Add(prefix + "Pattern " + (p + 1) + ": " + error.Message); }
+                }
             }
+            if (patternCount > MaxPatternsPerPolicy) errors.Add("A policy supports at most 100 patterns in total.");
             return errors;
+        }
+
+        public static IList<string> GetPatterns(Rule rule)
+        {
+            if (rule == null) throw Bad("Rule is missing.");
+            return rule.patterns != null ? (IList<string>)rule.patterns : new[] { rule.pattern };
+        }
+
+        public static bool RuleMatches(Rule rule, string text)
+        {
+            if (rule == null) throw Bad("Rule is missing.");
+            if (rule.patterns == null) return MatchText(text, rule.pattern);
+            if (rule.patterns.Count == 0 || rule.patterns.Count > MaxPatternsPerRule)
+                throw Bad("Use 1 to 16 patterns per rule.");
+            int steps = 0;
+            foreach (string pattern in rule.patterns)
+                if (Evaluate(text, CachedCompile(pattern), ref steps)) return true;
+            return false;
         }
 
         public static bool TargetProcess(Rule rule, string exe)
@@ -109,7 +142,7 @@ namespace PasteGuard
             {
                 if (rule == null || !rule.enabled || (!TargetProcess(rule, process) && !TargetSite(rule, url))) continue;
                 bool match;
-                try { match = MatchText(text, rule.pattern); }
+                try { match = RuleMatches(rule, text); }
                 catch (ArgumentException) { match = true; } // Reject unsafe policy changes conservatively.
                 if (match) matches.Add(rule.name ?? "Unnamed rule");
             }
@@ -120,7 +153,12 @@ namespace PasteGuard
         // UTF-16 code units and ASCII classes make these semantics reproducible in JavaScript.
         public static bool MatchText(string text, string pattern)
         {
-            List<Node> nodes = CachedCompile(pattern);
+            int steps = 0;
+            return Evaluate(text, CachedCompile(pattern), ref steps);
+        }
+
+        private static bool Evaluate(string text, List<Node> nodes, ref int steps)
+        {
             text = text ?? "";
             if (text.Length > MaxTextLength) return true;
             int count = nodes.Count;
@@ -136,7 +174,6 @@ namespace PasteGuard
             Atom first = count > 0 && nodes[0].kind == Kind.Atom ? nodes[0].atom : null;
             bool literalStart = first != null && !first.negate && first.ranges.Count == 2 && first.ranges[0] == first.ranges[1];
             char firstCharacter = literalStart ? (char)first.ranges[0] : '\0';
-            int steps = 0;
             int high = 0, clearLength = 0;
             for (int position = 0; position <= text.Length; position++)
             {

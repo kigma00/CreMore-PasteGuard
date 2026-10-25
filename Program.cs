@@ -11,7 +11,7 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("CreMore PasteGuard")]
 [assembly: System.Reflection.AssemblyProduct("CreMore PasteGuard")]
 [assembly: System.Reflection.AssemblyDescription("앱과 웹사이트의 민감정보 붙여넣기 보호")]
-[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 
 namespace PasteGuard
@@ -46,6 +46,9 @@ namespace PasteGuard
         readonly JavaScriptSerializer json = new JavaScriptSerializer();
         readonly WindowsGuard guard = new WindowsGuard();
         readonly ListBox list = new ListBox();
+        readonly ListBox patternList = new ListBox();
+        readonly List<string> editedPatterns = new List<string>();
+        bool syncingPattern;
         readonly HintTextBox name = new HintTextBox(), processes = new HintTextBox(), sites = new HintTextBox(), pattern = new HintTextBox(), sample = new HintTextBox();
         readonly CheckBox enabled = new CheckBox { Text = "이 규칙 사용", Checked = true, AutoSize = true };
         readonly Label state = new Label(), connection = new Label(), testResult = new Label();
@@ -77,10 +80,12 @@ namespace PasteGuard
             Font = UiFont(11); BackColor = Color.FromArgb(245, 247, 251);
             Directory.CreateDirectory(folder);
             policy = LoadPolicy();
+            policy.version = 2;
             policy.enabled = true; // The Start/Stop control owns global runtime protection.
             key = LoadKey();
             BuildUi(); RefreshRules();
-            foreach (var input in new[] { name, processes, sites, pattern }) input.TextChanged += (s, e) => MarkDirty();
+            foreach (var input in new[] { name, processes, sites }) input.TextChanged += (s, e) => MarkDirty();
+            pattern.TextChanged += (s, e) => UpdateEditedPattern();
             enabled.CheckedChanged += (s, e) => MarkDirty();
             AutoScaleDimensions = new SizeF(96F, 96F); AutoScaleMode = AutoScaleMode.Dpi;
             ResumeLayout(true);
@@ -119,8 +124,9 @@ namespace PasteGuard
             loading = true;
             editing = index; var r = index < 0 ? new Rule { name = "", enabled = true, pattern = RulePresets.Pattern(0) } : policy.rules[index];
             name.Text = r.name; processes.Text = String.Join(", ", r.processes ?? new List<string>());
-            sites.Text = String.Join(", ", r.sites ?? new List<string>()); pattern.Text = r.pattern ?? ""; enabled.Checked = r.enabled; testResult.Text = "";
-            preset.SelectedIndex = RulePresets.PatternIndex(pattern.Text); ConfigurePattern(); sample.Clear(); UpdateSampleHint();
+            sites.Text = String.Join(", ", r.sites ?? new List<string>()); enabled.Checked = r.enabled; testResult.Text = "";
+            editedPatterns.Clear(); editedPatterns.AddRange(PolicyEngine.GetPatterns(r)); RefreshPatterns(0);
+            sample.Clear(); UpdateSampleHint();
             testResult.Text = "실제 자격증명 대신 테스트 문자열을 사용하세요."; testResult.ForeColor = Muted;
             if (index < 0) list.ClearSelected(); else list.SelectedIndex = index;
             deleteButton.Enabled = index >= 0; loading = false; dirty = false;
@@ -129,7 +135,45 @@ namespace PasteGuard
         Rule EditedRule()
         {
             return new Rule { id = editing >= 0 ? policy.rules[editing].id : Guid.NewGuid().ToString("N"), name = name.Text.Trim(), enabled = enabled.Checked,
-                processes = Split(processes.Text), sites = Split(sites.Text), pattern = pattern.Text };
+                processes = Split(processes.Text), sites = Split(sites.Text),
+                pattern = editedPatterns.Count > 0 ? editedPatterns[0] : null, patterns = new List<string>(editedPatterns) };
+        }
+        void RefreshPatterns(int selected)
+        {
+            syncingPattern = true; patternList.BeginUpdate(); patternList.Items.Clear();
+            foreach (string value in editedPatterns) patternList.Items.Add(PatternLabel(value));
+            patternList.SelectedIndex = Math.Max(0, Math.Min(selected, editedPatterns.Count - 1));
+            patternList.EndUpdate(); syncingPattern = false; SelectPattern();
+            patternCount.Text = "검사 패턴 " + editedPatterns.Count + "/" + PolicyEngine.MaxPatternsPerRule + " (하나라도 일치하면 차단)";
+            addPatternButton.Enabled = editedPatterns.Count < PolicyEngine.MaxPatternsPerRule;
+            removePatternButton.Enabled = editedPatterns.Count > 1;
+        }
+        static string PatternLabel(string value) { return String.IsNullOrEmpty(value) ? "새 패턴 — 아래에 입력하세요" : value; }
+        void SelectPattern()
+        {
+            if (syncingPattern || patternList.SelectedIndex < 0) return;
+            syncingPattern = true;
+            pattern.Text = editedPatterns[patternList.SelectedIndex];
+            preset.SelectedIndex = RulePresets.PatternIndex(pattern.Text);
+            ConfigurePattern(); UpdateSampleHint(); syncingPattern = false;
+        }
+        void UpdateEditedPattern()
+        {
+            if (loading || syncingPattern || patternList.SelectedIndex < 0) return;
+            int selected = patternList.SelectedIndex; editedPatterns[selected] = pattern.Text;
+            syncingPattern = true; patternList.Items[selected] = PatternLabel(pattern.Text); syncingPattern = false;
+            MarkDirty();
+        }
+        void AddPattern()
+        {
+            if (editedPatterns.Count >= PolicyEngine.MaxPatternsPerRule) return;
+            editedPatterns.Add(""); RefreshPatterns(editedPatterns.Count - 1); MarkDirty(); pattern.Focus();
+        }
+        void RemovePattern()
+        {
+            int selected = patternList.SelectedIndex;
+            if (editedPatterns.Count <= 1 || selected < 0) return;
+            editedPatterns.RemoveAt(selected); RefreshPatterns(selected); MarkDirty();
         }
         static List<string> Split(string value) { return value.Split(new[] { ',', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList(); }
         bool SaveRule()
@@ -157,8 +201,9 @@ namespace PasteGuard
         {
             if (sample.Text.Length == 0) { testResult.Text = "먼저 테스트할 문자열을 입력하세요."; return; }
             try {
-                bool match = PolicyEngine.MatchText(sample.Text, pattern.Text);
-                testResult.Text = match ? "차단 조건에 해당해요. 패턴 일치 또는 검사 한도 초과입니다." : "이 검사 패턴에 해당하지 않아요.";
+                foreach (string value in editedPatterns) PolicyEngine.MatchText("", value);
+                bool match = PolicyEngine.RuleMatches(EditedRule(), sample.Text);
+                testResult.Text = match ? "차단 조건에 해당해요. 패턴 일치 또는 검사 한도 초과입니다." : "등록된 모든 패턴에 해당하지 않아요.";
                 testResult.ForeColor = match ? Accent : Muted;
             }
             catch (ArgumentException) { testResult.Text = "검사 패턴을 확인하세요. ‘패턴 도움말’을 참고하세요."; testResult.ForeColor = Danger; }
@@ -192,7 +237,7 @@ namespace PasteGuard
         string GetPolicyJson()
         {
             var snapshot = browserPolicy;
-            if (snapshot == null) return "{\"version\":1,\"enabled\":false,\"rules\":[]}";
+            if (snapshot == null) return "{\"version\":2,\"enabled\":false,\"rules\":[]}";
             return running && guard.IsRunning ? snapshot.Enabled : snapshot.Disabled;
         }
         void OnBrowserEvent(string host, string rule, string reason)

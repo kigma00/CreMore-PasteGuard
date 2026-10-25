@@ -12,6 +12,10 @@ function policy() {
   return { version: 1, enabled: true, rules: [{ id: 'demo', name: 'Demo token', enabled: true,
     processes: ['Slack.exe', 'Notion.exe'], sites: ['slack.com', '*.slack.com', 'notion.so', '*.notion.so', 'localhost'], pattern: 'PGTEST_[A-Z0-9]{16}' }] };
 }
+function multiPolicy(patterns = ['FIRST_[0-9]{4}', 'SECOND_[A-Z]{4}', 'THIRD_[a-z]{4}']) {
+  const result = policy(); result.version = 2; result.rules[0].patterns = patterns;
+  return result;
+}
 
 const cases = [
   [token, 'PGTEST_[A-Z0-9]{16}', true], ['PGTEST_abcd1234EFGH5678', 'PGTEST_[A-Z0-9]{16}', false],
@@ -86,10 +90,62 @@ let disabled = policy(); disabled.enabled = false;
 check(!decision(disabled, 'https://slack.com', token), 'disabled global policy allowed');
 disabled = policy(); disabled.rules[0].enabled = false;
 check(!decision(disabled, 'https://slack.com', token), 'disabled rule allowed');
-for (const alter of [p => p.version = 2, p => p.rules.push(p.rules[0]), p => p.rules[0].pattern = '(a+)+',
+for (const alter of [p => p.version = 3, p => p.rules.push(p.rules[0]), p => p.rules[0].pattern = '(a+)+',
   p => p.rules[0].sites = ['slack.com/'], p => { p.rules[0].sites = []; p.rules[0].processes = []; }]) {
   const p = policy(); alter(p); checks++; assert.throws(() => engine.preparePolicy(p), undefined, 'invalid policy rejected atomically');
 }
+
+const orPolicy = multiPolicy();
+for (const sample of ['FIRST_1234', 'SECOND_ABCD', 'THIRD_abcd'])
+  check(decision(orPolicy, 'https://slack.com', sample), 'OR matches each pattern independently: ' + sample);
+check(!decision(orPolicy, 'https://slack.com', 'ordinary text'), 'OR allows text matching no pattern');
+check(!decision(orPolicy, 'https://slack.com', token), 'v2 patterns override the legacy field');
+check(!decision(orPolicy, 'https://example.com', 'SECOND_ABCD'), 'OR does not change site scope');
+const onlyPatterns = multiPolicy(); delete onlyPatterns.rules[0].pattern;
+check(decision(onlyPatterns, 'https://slack.com', 'THIRD_abcd'), 'v2 works without a legacy pattern field');
+const ignoredLegacy = multiPolicy(); ignoredLegacy.rules[0].pattern = '(unsafe)';
+check(decision(ignoredLegacy, 'https://slack.com', 'SECOND_ABCD'), 'only effective patterns are validated');
+for (const version of [1, 2]) {
+  for (const withNull of [false, true]) {
+    const fallback = policy(); fallback.version = version;
+    if (withNull) fallback.rules[0].patterns = null;
+    check(decision(fallback, 'https://slack.com', token), 'legacy fallback remains valid for version ' + version);
+  }
+}
+const sixteen = multiPolicy(Array.from({ length: 16 }, (_, i) => 'TOKEN' + i));
+check(decision(sixteen, 'https://slack.com', 'TOKEN15'), '16 patterns accepted');
+for (const patterns of [[], 'SECOND_[A-Z]{4}', {}, ['safe', null], ['safe', ''], ['safe', 123], ['safe', {}],
+  ['safe', '(unsafe)'], ['safe', ['nested']], new Array(2), Array(17).fill('safe')]) {
+  const data = multiPolicy(patterns); checks++;
+  assert.throws(() => engine.preparePolicy(data), undefined, 'malformed or excessive pattern list rejected');
+}
+for (const patterns of [[], ['safe'], ['safe', 'other']]) {
+  const data = multiPolicy(patterns); data.version = 1; checks++;
+  assert.throws(() => engine.preparePolicy(data), undefined, 'v1 cannot carry the v2 field');
+}
+const disabledInvalid = multiPolicy(['safe', '(invalid)']); disabledInvalid.rules[0].enabled = false;
+checks++; assert.throws(() => engine.preparePolicy(disabledInvalid), undefined, 'disabled rule still validates all patterns');
+const hundredPatterns = multiPolicy();
+hundredPatterns.rules = Array.from({ length: 7 }, (_, i) => ({ ...policy().rules[0], id: 'multi-' + i,
+  patterns: Array(i === 6 ? 4 : 16).fill('z') }));
+check(engine.preparePolicy(hundredPatterns).rules.length === 7, '100 total patterns accepted');
+hundredPatterns.rules[6].patterns.push('z');
+checks++; assert.throws(() => engine.preparePolicy(hundredPatterns), undefined, '101 total patterns rejected');
+hundredPatterns.rules.forEach(rule => { rule.enabled = false; rule.sites = []; });
+checks++; assert.throws(() => engine.preparePolicy(hundredPatterns), undefined, 'disabled native-only rules count toward total');
+const boundedOr = multiPolicy(Array(16).fill('^a*b'));
+const largeText = 'a'.repeat(engine.limits.text);
+const singleInspection = engine.evaluate(engine.compile('^a*b'), largeText);
+check(!singleInspection.matched && !singleInspection.limited, 'individual nonmatching pattern remains below budget');
+began = Date.now();
+const boundedResult = engine.decidePaste(engine.preparePolicy(boundedOr), 'https://slack.com', largeText);
+check(boundedResult.block && boundedResult.reason === 'limit', 'patterns share one 8M budget within their rule');
+check(Date.now() - began < 10000, 'multi-pattern worst case remains bounded');
+check(!decision(boundedOr, 'https://example.com', largeText), 'untargeted site skips multi-pattern evaluation');
+const disabledOr = multiPolicy(); disabledOr.rules[0].enabled = false;
+check(!decision(disabledOr, 'https://slack.com', 'SECOND_ABCD'), 'disabled OR rule remains allowed');
+const pausedOr = multiPolicy(); pausedOr.enabled = false;
+check(!decision(pausedOr, 'https://slack.com', 'SECOND_ABCD'), 'disabled OR policy remains allowed');
 
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 function contentFixture(url = 'https://slack.com/private?secret=example') {
@@ -134,11 +190,22 @@ async function runAsyncTests() {
     && !JSON.stringify(m).includes(token) && !JSON.stringify(m).includes('/private')), 'content logs exclude clipboard and URL');
   const broken = policy(); broken.rules[0].pattern = '(unsafe)'; page.update(broken);
   check(page.paste(token).prevented, 'invalid update retains last valid policy');
+  page.update(multiPolicy(['PGTEST_[A-Z0-9]{16}', '^PGTEST_']));
+  const beforeOrPaste = page.outgoing.filter(message => message.type === 'blocked').length;
+  check(page.paste(token).prevented, 'v2 content policy blocks overlapping patterns');
+  check(page.outgoing.filter(message => message.type === 'blocked').length === beforeOrPaste + 1,
+    'multiple matching patterns emit exactly one rule event per paste');
+  page.update(multiPolicy(['FIRST_[0-9]{4}', '(invalid)']));
+  check(page.paste(token).prevented, 'malformed multi-pattern update preserves prior verified policy');
+  page.update(multiPolicy());
+  check(page.paste('THIRD_abcd').prevented, 'content script evaluates a later OR pattern');
+  check(!page.paste('ordinary text').prevented, 'content script allows nonmatching OR text');
   const paused = policy(); paused.enabled = false; page.update(paused);
   check(!page.paste(token).prevented, 'policy pause propagates to content');
   page.update(null); check(!page.paste(token).prevented, 'disconnect removes policy');
   const child = contentFixture('https://example.com/frame'); child.init(policy()); await tick();
   check(!child.paste(token).prevented, 'frame uses its own URL scope');
+  child.update(multiPolicy()); check(!child.paste('SECOND_ABCD').prevented, 'OR frame scope remains independent');
 
   let bridgePolicy = policy(), bridgeError = false, receiver;
   const requests = [], stored = { pairingKey: 'a'.repeat(32), policy: policy(), lastSync: 1 }, broadcasts = [];
@@ -204,15 +271,44 @@ async function runAsyncTests() {
   bridgeError = false; bridgePolicy = policy(); bridgePolicy.rules[0].pattern = '(bad)';
   const invalid = await call({ type: 'sync' });
   check(invalid.policy.rules[0].pattern === 'PGTEST_[A-Z0-9]{16}' && !!invalid.error, 'invalid bridge policy preserves verified cache');
+  bridgePolicy = multiPolicy();
+  const upgraded = await call({ type: 'sync' });
+  check(upgraded.policy.version === 2 && stored.policy.rules[0].patterns.length === 3 && !upgraded.error,
+    'cached legacy policy upgrades to validated v2 OR policy');
+  check(broadcasts.at(-1).policy.rules[0].patterns[2] === 'THIRD_[a-z]{4}', 'all new patterns broadcast to existing frames');
+  bridgeError = true;
+  const offlineOr = await call({ type: 'sync' });
+  check(offlineOr.policy.version === 2 && offlineOr.policy.rules[0].patterns.length === 3 && !!offlineOr.error,
+    'v2 cached policy stays available while native app is offline');
+  bridgeError = false; bridgePolicy = multiPolicy(['safe', '']);
+  const malformedOr = await call({ type: 'sync' });
+  check(malformedOr.policy.rules[0].patterns.length === 3 && !!malformedOr.error,
+    'malformed multi-pattern bridge response cannot replace verified cache');
+  bridgePolicy = multiPolicy(); bridgePolicy.version = 1;
+  const unsafeVersion = await call({ type: 'sync' });
+  check(unsafeVersion.policy.version === 2 && !!unsafeVersion.error, 'v1 with v2 fields is rejected without partial application');
+  bridgePolicy = policy();
+  const legacyAgain = await call({ type: 'sync' });
+  check(legacyAgain.policy.version === 1 && !legacyAgain.error, 'legacy v1 bridge still accepted after v2 use');
+  stored.policy = multiPolicy(); bridgeError = true;
+  const restarted = vm.createContext({ URL, AbortSignal, Date: Clock, Promise, console,
+    fetch: background.fetch, chrome: background.chrome, importScripts() { restarted.PasteGuard = engine; }
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/background.js'), 'utf8'), restarted);
+  await tick();
+  const restored = await call({ type: 'getPolicy' }, sender);
+  check(restored.policy.version === 2 && restored.policy.rules[0].patterns.length === 3,
+    'service worker restart loads cached v2 policy while app is offline');
   await call({ type: 'disconnect' }, { tab: { id: 2 }, url: 'chrome-extension://unit-test/popup.html' });
   check(!stored.pairingKey && !stored.policy && broadcasts.at(-1).policy === null, 'options tab disconnect removes policy and secret');
   let popupTimer, visibilityChanged;
   const popupMessages = [], controls = new Map();
   const popupDocument = { hidden: true,
     getElementById(id) {
-      if (!controls.has(id)) controls.set(id, { addEventListener() {}, replaceChildren() {}, value: '' });
+      if (!controls.has(id)) controls.set(id, { addEventListener() {}, replaceChildren(...children) { this.children = children; }, value: '' });
       return controls.get(id);
     },
+    createElement() { return { append(...children) { this.children = children; } }; },
     addEventListener(type, handler) { if (type === 'visibilitychange') visibilityChanged = handler; }
   };
   const popup = vm.createContext({ document: popupDocument, Date, setInterval(handler) { popupTimer = handler; },
@@ -226,6 +322,11 @@ async function runAsyncTests() {
   check(popupMessages.filter(message => message.type === 'sync').length === 1, 'returning to options refreshes immediately');
   popupTimer(); await tick();
   check(popupMessages.filter(message => message.type === 'sync').length === 2, 'visible popup retains fast policy refresh');
+  const renderPopup = vm.runInContext('render', popup);
+  renderPopup({ paired: true, policy: multiPolicy(), lastSync: Date.now() });
+  check(controls.get('rules').children[0].children[0].textContent === 'Demo token (패턴 3개)', 'popup shows effective OR pattern count');
+  renderPopup({ paired: true, policy: policy(), lastSync: Date.now() });
+  check(controls.get('rules').children[0].children[0].textContent === 'Demo token (패턴 1개)', 'popup shows legacy single-pattern count');
   console.log('PASS: ' + checks + ' extension matcher, scope, paste-event and privacy checks.');
 }
 runAsyncTests().catch(error => { console.error(error); process.exitCode = 1; });

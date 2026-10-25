@@ -83,6 +83,7 @@ namespace PasteGuard
             Policy copy = new Policy { version = policy.version, enabled = policy.enabled };
             foreach (Rule rule in policy.rules)
                 copy.rules.Add(new Rule { id = rule.id, name = rule.name, enabled = rule.enabled, pattern = rule.pattern,
+                    patterns = rule.patterns == null ? null : new List<string>(rule.patterns),
                     processes = new List<string>(rule.processes), sites = new List<string>(rule.sites) });
             state = new State(copy);
             refresh.Set();
@@ -270,7 +271,7 @@ namespace PasteGuard
                             foreach (Rule rule in current.Policy.rules)
                             {
                                 if (!running || current != state || cache.Sequence != GetClipboardSequenceNumber()) break;
-                                if (!rule.enabled || rule.processes.Count == 0 || !PolicyEngine.MatchText(text, rule.pattern)) continue;
+                                if (!rule.enabled || rule.processes.Count == 0 || !PolicyEngine.RuleMatches(rule, text)) continue;
                                 foreach (string process in rule.processes)
                                 {
                                     List<string> names;

@@ -1,7 +1,8 @@
 // Restricted, bounded UTF-16 NFA. Keep semantics aligned with Core.cs.
 (function (root) {
   'use strict';
-  const limits = Object.freeze({ pattern: 512, repeat: 256, states: 2048, text: 65536, steps: 8000000 });
+  const limits = Object.freeze({ pattern: 512, patternsPerRule: 16, patternsPerPolicy: 100,
+    repeat: 256, states: 2048, text: 65536, steps: 8000000 });
   const cache = new Map();
   // Matching is synchronous. Reuse bounded scratch space; it never contains pasted text.
   let scratchA = new Uint8Array(0), scratchB = new Uint8Array(0);
@@ -196,9 +197,10 @@
     return target.startsWith('*.') ? host.length > target.length - 1 && host.endsWith(target.slice(1)) : host === target;
   }
   function preparePolicy(policy) {
-    if (!policy || policy.version !== 1 || typeof policy.enabled !== 'boolean'
+    if (!policy || ![1, 2].includes(policy.version) || typeof policy.enabled !== 'boolean'
       || !Array.isArray(policy.rules) || policy.rules.length > 100) bad('지원하지 않는 정책 형식입니다.');
     const ids = new Set();
+    let patternCount = 0;
     const rules = policy.rules.map(rule => {
       if (!rule || typeof rule.id !== 'string' || !rule.id.trim() || rule.id.length > 64 || ids.has(rule.id)
         || typeof rule.name !== 'string' || !rule.name.trim() || rule.name.length > 80
@@ -206,7 +208,14 @@
         || rule.processes.length > 128 || rule.sites.length > 128 || !rule.processes.length && !rule.sites.length
         || !rule.processes.every(validProcess) || !rule.sites.every(validSite)) bad('규칙의 이름 또는 대상 형식이 잘못되었습니다.');
       ids.add(rule.id);
-      return { ...rule, nodes: compile(rule.pattern), targets: rule.sites.map(scope => scope.toLowerCase()) };
+      if (policy.version === 1 && rule.patterns != null) bad('여러 패턴은 정책 버전 2에서만 지원합니다.');
+      const patterns = rule.patterns == null ? [rule.pattern] : rule.patterns;
+      if (!Array.isArray(patterns) || !patterns.length || patterns.length > limits.patternsPerRule)
+        bad('규칙의 패턴은 1~16개 문자열 배열이어야 합니다.');
+      patternCount += patterns.length;
+      if (patternCount > limits.patternsPerPolicy) bad('정책 전체의 패턴은 100개를 넘을 수 없습니다.');
+      // Compile every effective pattern, including disabled rules, before applying any policy.
+      return { ...rule, programs: Array.from(patterns, compile), targets: rule.sites.map(scope => scope.toLowerCase()) };
     });
     return { enabled: policy.enabled, rules };
   }
@@ -217,8 +226,10 @@
     const budget = { steps: 0 };
     for (const rule of prepared.rules) {
       if (!rule.enabled || !rule.targets.some(target => matchesHost(target, host))) continue;
-      const result = evaluate(rule.nodes, text, budget);
-      if (result.matched) return { block: true, rule, reason: result.limited ? 'limit' : 'pattern' };
+      for (const program of rule.programs) {
+        const result = evaluate(program, text, budget);
+        if (result.matched) return { block: true, rule, reason: result.limited ? 'limit' : 'pattern' };
+      }
     }
     return { block: false };
   }

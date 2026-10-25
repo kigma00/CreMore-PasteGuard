@@ -176,6 +176,54 @@ static class UiFlowTests
             var persisted = new JavaScriptSerializer().Deserialize<Policy>(File.ReadAllText(Path.Combine(baseDir, "data", "policy.json")));
             Check(persisted.rules.Count == 2 && persisted.rules[0].pattern == "CUSTOM_[0-9]{6}",
                 "The expected rules and custom pattern are persisted.");
+            ListBox patternList = Field<ListBox>(form, "patternList");
+            Call(form, "AddPattern");
+            Check(patternList.Items.Count == 2 && patternList.SelectedIndex == 1 && pattern.TextLength == 0,
+                "Adding a pattern selects a blank editor without replacing the first pattern.");
+            Check(PolicyEngine.Validate(new Policy { rules = new List<Rule> { (Rule)Call(form, "EditedRule") } }).Count > 0,
+                "An unfinished additional pattern is rejected rather than silently omitted.");
+            pattern.Text = "ghg_[A-Za-z0-9]+";
+            sample.Text = "ghg_SYNTHETIC123";
+            Call(form, "TestRule");
+            Check(Field<Label>(form, "testResult").Text.StartsWith("차단 조건"), "The second pattern is included in the editor test.");
+            sample.Text = "ordinary sentence";
+            Call(form, "TestRule");
+            Check(Field<Label>(form, "testResult").Text.StartsWith("등록된 모든"), "Ordinary text passes all editor patterns.");
+            patternList.SelectedIndex = 0;
+            Check(pattern.Text == "CUSTOM_[0-9]{6}", "Selecting the first pattern restores its exact text.");
+            sample.Text = "ghg_SYNTHETIC123";
+            Call(form, "TestRule");
+            Check(Field<Label>(form, "testResult").Text.StartsWith("차단 조건"), "Testing includes unselected patterns as well.");
+            Check((bool)Call(form, "SaveRule"), "Multiple patterns save together.");
+            persisted = new JavaScriptSerializer().Deserialize<Policy>(File.ReadAllText(Path.Combine(baseDir, "data", "policy.json")));
+            Check(persisted.version == 2 && persisted.rules[0].patterns.SequenceEqual(new[] { "CUSTOM_[0-9]{6}", "ghg_[A-Za-z0-9]+" }),
+                "The v2 policy persists both patterns without changing their order.");
+            var multiBrowser = new JavaScriptSerializer().Deserialize<Policy>(readPolicy());
+            Check(multiBrowser.version == 2 && multiBrowser.rules[0].patterns.Count == 2,
+                "The browser receives all patterns with the new policy version.");
+            list.SelectedIndex = 1; list.SelectedIndex = 0;
+            Check(patternList.Items.Count == 2 && !Field<bool>(form, "dirty"), "Reloading multiple patterns does not dirty the rule.");
+            patternList.SelectedIndex = 1; preset.SelectedIndex = 1;
+            Rule multiDraft = (Rule)Call(form, "EditedRule");
+            Check(multiDraft.patterns[0] == "CUSTOM_[0-9]{6}" && multiDraft.patterns[1] == RulePresets.Pattern(1),
+                "Choosing a preset replaces only the selected pattern.");
+            Call(form, "RemovePattern");
+            Check(patternList.Items.Count == 1 && pattern.Text == "CUSTOM_[0-9]{6}", "Deleting the second pattern preserves the first.");
+            Call(form, "RemovePattern");
+            Check(patternList.Items.Count == 1, "The last pattern cannot be deleted.");
+            Check((bool)Call(form, "SaveRule"), "Pattern deletion is saved.");
+            for (int i = 1; i < PolicyEngine.MaxPatternsPerRule; i++) { Call(form, "AddPattern"); pattern.Text = "DUMMY_" + i; }
+            Call(form, "AddPattern");
+            Check(patternList.Items.Count == PolicyEngine.MaxPatternsPerRule && !Field<Button>(form, "addPatternButton").Enabled,
+                "The editor enforces the per-rule pattern limit.");
+            Call(form, "EditRule", 0);
+            Check(patternList.Items.Count == 1 && !Field<bool>(form, "dirty"), "Discarding unsaved patterns restores the saved rule.");
+            var legacy = new Policy { version = 1, rules = new List<Rule> { new Rule { id = "legacy", name = "Old rule",
+                pattern = "LEGACY_[0-9]+", processes = new List<string> { "Editor.exe" } } } };
+            File.WriteAllText(Path.Combine(baseDir, "data", "policy.json"), new JavaScriptSerializer().Serialize(legacy));
+            Policy loadedLegacy = (Policy)Call(form, "LoadPolicy");
+            Check(loadedLegacy.rules[0].id == "legacy" && PolicyEngine.GetPatterns(loadedLegacy.rules[0]).Single() == "LEGACY_[0-9]+",
+                "Legacy single-pattern files load without losing the original pattern or ID.");
             Check(Field<string>(form, "key") == keyBefore && File.ReadAllBytes(Path.Combine(baseDir, "data", "pairing.key")).SequenceEqual(storedKeyBefore),
                 "Rule editing preserves the pairing key and its stored bytes.");
             Check(!Field<bool>(form, "running"), "No test started Windows protection.");

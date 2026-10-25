@@ -189,7 +189,7 @@ internal static class CoreTests
             Check(PolicyEngine.Validate(policy).Count > 0, "targetless rule rejected");
             policy.rules = new List<Rule> { ExampleRule(), ExampleRule() };
             Check(PolicyEngine.Validate(policy).Count > 0, "duplicate IDs rejected");
-            policy.rules = new List<Rule> { ExampleRule() }; policy.version = 2;
+            policy.rules = new List<Rule> { ExampleRule() }; policy.version = 3;
             Check(PolicyEngine.Validate(policy).Count > 0, "unknown version rejected");
             policy.version = 1;
             var serializer = new JavaScriptSerializer();
@@ -198,6 +198,65 @@ internal static class CoreTests
             var roundtrip = serializer.Deserialize<Policy>(json);
             Check(PolicyEngine.Validate(roundtrip).Count == 0, "JSON round trip");
             Check(PolicyEngine.Matches(roundtrip, token, "Notion.exe", null).Count == 1, "round trip rule works");
+            Check(roundtrip.rules[0].patterns == null && PolicyEngine.GetPatterns(roundtrip.rules[0])[0] == rule.pattern,
+                "legacy policy preserves its single pattern");
+            var absentPatterns = serializer.Deserialize<Policy>(json.Replace(",\"patterns\":null", ""));
+            Check(PolicyEngine.Validate(absentPatterns).Count == 0 && PolicyEngine.RuleMatches(absentPatterns.rules[0], token),
+                "legacy JSON without a patterns field remains readable");
+
+            var multi = ExampleRule();
+            multi.pattern = "LEGACY-IGNORED";
+            multi.patterns = new List<string> { "FIRST_[0-9]{4}", "SECOND_[A-Z]{4}" };
+            var multiPolicy = new Policy { rules = new List<Rule> { multi } };
+            Check(multiPolicy.version == 2 && PolicyEngine.Validate(multiPolicy).Count == 0, "new policy supports pattern lists");
+            Check(PolicyEngine.RuleMatches(multi, "FIRST_1234"), "first pattern blocks");
+            Check(PolicyEngine.RuleMatches(multi, "SECOND_ABCD"), "second pattern blocks");
+            Check(!PolicyEngine.RuleMatches(multi, "LEGACY-IGNORED"), "pattern list takes precedence over legacy field");
+            multi.pattern = null;
+            Check(PolicyEngine.Validate(multiPolicy).Count == 0, "v2 pattern list does not require a legacy field");
+            Check(!PolicyEngine.RuleMatches(multi, "ordinary"), "all nonmatching patterns permit text");
+            Check(PolicyEngine.Matches(multiPolicy, "FIRST_1234 SECOND_ABCD", "Slack.exe", null).Count == 1,
+                "multiple matches produce one event per rule");
+            Check(PolicyEngine.Matches(multiPolicy, "SECOND_ABCD", "notepad.exe", "https://example.com").Count == 0,
+                "multiple patterns do not expand target scope");
+            multi.enabled = false;
+            Check(PolicyEngine.Matches(multiPolicy, "SECOND_ABCD", "Slack.exe", null).Count == 0, "disabled multipattern rule permits text");
+            multi.enabled = true;
+            string multiJson = serializer.Serialize(multiPolicy);
+            var multiRoundtrip = serializer.Deserialize<Policy>(multiJson);
+            Check(multiJson.Contains("\"version\":2") && multiJson.Contains("\"patterns\""), "v2 pattern-list serialization");
+            Check(PolicyEngine.Validate(multiRoundtrip).Count == 0 && PolicyEngine.RuleMatches(multiRoundtrip.rules[0], "SECOND_ABCD"),
+                "pattern list JSON round trip");
+            multiPolicy.version = 1;
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "v1 cannot silently carry v2 patterns");
+            multiPolicy.version = 2;
+            multi.patterns.Add("(unsupported)");
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "one invalid additional pattern rejects saving");
+            multi.patterns[2] = null;
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "null additional pattern rejects saving");
+            multi.patterns[2] = "";
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "empty additional pattern rejects saving");
+            multi.patterns.Clear();
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "explicit empty list does not fall back to legacy field");
+            for (int i = 0; i < PolicyEngine.MaxPatternsPerRule; i++) multi.patterns.Add("a*a*a*a*b");
+            Check(PolicyEngine.Validate(multiPolicy).Count == 0, "sixteen patterns are allowed");
+            string costly = new string('a', PolicyEngine.MaxTextLength);
+            Check(!PolicyEngine.MatchText(costly, multi.patterns[0]), "single costly nonmatch stays within budget");
+            Check(PolicyEngine.RuleMatches(multi, costly), "patterns share one conservative rule inspection budget");
+            multi.patterns.Add("seventeenth");
+            Check(PolicyEngine.Validate(multiPolicy).Count > 0, "seventeenth pattern is rejected");
+            multi.patterns.RemoveAt(16);
+            var boundedPolicy = new Policy();
+            for (int i = 0; i < 6; i++)
+            {
+                Rule bounded = ExampleRule(); bounded.id = "limit-" + i;
+                bounded.patterns = new List<string>(multi.patterns); boundedPolicy.rules.Add(bounded);
+            }
+            Rule last = ExampleRule(); last.id = "limit-last"; last.patterns = new List<string> { "a", "b", "c", "d" };
+            boundedPolicy.rules.Add(last);
+            Check(PolicyEngine.Validate(boundedPolicy).Count == 0, "one hundred total patterns allowed");
+            last.enabled = false; last.patterns.Add("e");
+            Check(PolicyEngine.Validate(boundedPolicy).Count > 0, "total pattern cap includes disabled rules");
             Check(PolicyEngine.Validate(null).Count > 0, "missing policy rejected");
             Check(PolicyEngine.Validate(new Policy { rules = null }).Count > 0, "missing rules rejected");
             Check(PolicyEngine.Validate(new Policy { rules = new List<Rule> { null } }).Count > 0, "missing rule rejected");

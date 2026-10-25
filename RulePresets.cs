@@ -44,8 +44,8 @@ namespace PasteGuard
 
         public static string Description(int index)
         {
-            if (index == 0) return "PGTEST_ 뒤 영문 대문자·숫자 16자리 형식을 찾습니다. 테스트용 가짜 문자열입니다.";
-            if (index == 1) return "ghp_ 뒤 영문·숫자 36자리 형식을 찾습니다. 토큰의 실제 유효성은 확인하지 않습니다. 예시는 가짜입니다.";
+            if (index == 0) return "PGTEST_ 뒤 영문 대문자와 숫자 16자리 형식을 찾습니다. 테스트용 가짜 문자열입니다.";
+            if (index == 1) return "ghp_ 뒤 영문과 숫자 36자리 형식을 찾습니다. 토큰의 실제 유효성은 확인하지 않습니다. 예시는 가짜입니다.";
             return "지원하는 패턴 문법으로 직접 입력하세요. 문자열 형식만 검사하며 실제 유효성은 확인하지 않습니다.";
         }
 

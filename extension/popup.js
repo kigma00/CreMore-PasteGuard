@@ -7,7 +7,7 @@ function render(state) {
   const fresh = state.lastSync && Date.now() - state.lastSync < 15000 && !state.error;
   $('dot').className = 'dot ' + (fresh && state.policy?.enabled ? 'good' : hasPolicy ? 'warn' : '');
   $('status').textContent = !state.paired ? 'Windows 앱 연결 필요'
-    : !hasPolicy ? '정책 대기 중 · 보호 준비 전'
+    : !hasPolicy ? '정책 대기 중, 보호 준비 전'
     : !state.policy.enabled ? '전체 보호 일시 중지'
     : fresh ? '웹사이트 보호 사용 중' : '저장된 정책으로 보호 중';
   $('detail').textContent = state.error || (state.lastSync
@@ -17,13 +17,15 @@ function render(state) {
   $('count').textContent = rules.length;
   $('rules').replaceChildren(...rules.map(rule => {
     const item = document.createElement('li');
-    const title = document.createElement('strong'); title.textContent = rule.name;
+    const title = document.createElement('strong');
+    const patternCount = Array.isArray(rule.patterns) ? rule.patterns.length : 1;
+    title.textContent = rule.name + ' (패턴 ' + patternCount + '개)';
     const scopes = document.createElement('small'); scopes.textContent = rule.sites.join(', ');
     item.append(title, scopes); return item;
   }));
   $('empty').hidden = rules.length > 0;
   $('disconnect').hidden = !state.paired;
-  $('key').placeholder = state.paired ? '연결됨 · 키를 바꾸려면 입력' : '앱의 연결 키 붙여넣기';
+  $('key').placeholder = state.paired ? '연결됨, 새 키 입력' : '앱의 연결 키 붙여넣기';
 }
 
 async function act(message) {

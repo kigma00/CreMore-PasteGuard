@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -33,6 +34,7 @@ internal static class NativeHarness
         }
         if (args.Length == 1 && args[0] == "--lifecycle")
         {
+            CheckSnapshot();
             // Empty policy means this test never acquires clipboard text or blocks input.
             using (WindowsGuard guard = new WindowsGuard())
             {
@@ -43,6 +45,7 @@ internal static class NativeHarness
             }
             return 0;
         }
+        if (args.Length == 1 && args[0] == "--snapshot") { CheckSnapshot(); return 0; }
         bool preserveText = args.Length == 1 && args[0] == "--run-preserve-text";
         if (args.Length != 1 || (args[0] != "--run" && !preserveText))
         {
@@ -108,25 +111,29 @@ internal static class NativeHarness
                 target.Show();
                 Application.DoEvents();
                 Policy policy = new Policy();
-                policy.rules.Add(new Rule { id = "native-test", name = "Dummy test rule", pattern = "DUMMY-KEY-[0-9]+",
+                policy.rules.Add(new Rule { id = "native-test", name = "Dummy test rule", pattern = "NEVER-MATCH",
+                    patterns = new List<string> { "NEVER-MATCH", "DUMMY-KEY-[0-9]+", "DUMMY-KEY-[0-9]+" },
                     processes = new List<string> { Path.GetFileName(Application.ExecutablePath).ToUpperInvariant() } });
                 guard.SetPolicy(policy);
                 PutDummy(DummySecret);
                 guard.Start();
                 int events = 0;
+                int matchedRuleCount = 0;
                 guard.Blocked += delegate(BlockEvent item)
                 {
                     if (item.ProcessName.IndexOf("NativeHarness", StringComparison.OrdinalIgnoreCase) >= 0
-                        && item.Reason.Length > 0) Interlocked.Increment(ref events);
+                        && item.Reason.Length > 0)
+                    { matchedRuleCount = item.RuleNames.Length; Interlocked.Increment(ref events); }
                 };
 
                 WaitFor(delegate { return guard.IsClipboardReady; }, "clipboard preparation");
                 Paste(target.Handle, box.Handle, false);
-                Check(ReadOwnBox(box.Handle).Length == 0, "Ctrl+V blocks a matching rule");
+                Check(ReadOwnBox(box.Handle).Length == 0, "Ctrl+V blocks the second pattern in a rule");
                 Check(GetClipboardSequenceNumber() == ownedSequence, "blocked paste leaves clipboard unchanged");
                 Paste(target.Handle, box.Handle, true);
                 Check(ReadOwnBox(box.Handle).Length == 0, "Shift+Insert blocks a matching rule");
                 WaitFor(delegate { return events >= 2; }, "metadata-only block notifications");
+                Check(matchedRuleCount == 1, "multiple matching patterns report one rule");
 
                 PutDummy("ordinary dummy note");
                 WaitFor(delegate { return guard.IsClipboardReady; }, "benign clipboard preparation");
@@ -139,7 +146,8 @@ internal static class NativeHarness
                 SendMessage(box.Handle, 0x000C, IntPtr.Zero, "");
                 PutDummy(DummySecret);
                 WaitFor(delegate { return guard.IsClipboardReady; }, "matching clipboard preparation");
-                policy.rules[0].pattern = "NEVER-MATCH"; // Snapshot is independent of caller mutation.
+                policy.rules[0].patterns.Clear(); // Snapshot is independent of caller mutation.
+                policy.rules[0].patterns.Add("NEVER-MATCH");
                 Paste(target.Handle, box.Handle, false);
                 Check(ReadOwnBox(box.Handle).Length == 0, "caller mutation does not change the active policy");
                 guard.SetPolicy(policy);
@@ -147,7 +155,7 @@ internal static class NativeHarness
                 Paste(target.Handle, box.Handle, false);
                 Check(ReadOwnBox(box.Handle) == DummySecret, "policy update refreshes cached matches");
 
-                policy.rules[0].pattern = "DUMMY-KEY-[0-9]+";
+                policy.rules[0].patterns.Add("DUMMY-KEY-[0-9]+");
                 guard.SetPolicy(policy);
                 WaitFor(delegate { return guard.IsClipboardReady; }, "restored policy preparation");
                 other = Process.Start(new ProcessStartInfo(otherPath, "--other") { UseShellExecute = false });
@@ -199,6 +207,32 @@ internal static class NativeHarness
                 original.Clear();
                 clipboardWindow.Dispose();
             }
+        }
+    }
+
+    private static void CheckSnapshot()
+    {
+        using (var guard = new WindowsGuard())
+        {
+            var rule = new Rule { id = "snapshot", name = "Snapshot", pattern = "LEGACY",
+                patterns = new List<string> { "FIRST", "SECOND" }, processes = new List<string> { "Snapshot.exe" } };
+            var policy = new Policy { rules = new List<Rule> { rule } };
+            guard.SetPolicy(policy);
+            FieldInfo stateField = typeof(WindowsGuard).GetField("state", BindingFlags.NonPublic | BindingFlags.Instance);
+            object state = stateField.GetValue(guard);
+            var snapshot = (Policy)state.GetType().GetField("Policy", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(state);
+            rule.patterns[1] = "MUTATED";
+            Check(PolicyEngine.RuleMatches(snapshot.rules[0], "SECOND"), "native snapshot preserves additional patterns");
+            Check(!PolicyEngine.RuleMatches(snapshot.rules[0], "MUTATED"), "native snapshot deep-copies the pattern list");
+            rule.patterns[1] = "(invalid)";
+            bool rejected = false;
+            try { guard.SetPolicy(policy); } catch (ArgumentException) { rejected = true; }
+            Check(rejected && Object.ReferenceEquals(state, stateField.GetValue(guard)), "invalid additional pattern preserves active snapshot");
+            rule.patterns = null; policy.version = 1;
+            guard.SetPolicy(policy);
+            state = stateField.GetValue(guard);
+            snapshot = (Policy)state.GetType().GetField("Policy", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(state);
+            Check(snapshot.version == 1 && PolicyEngine.RuleMatches(snapshot.rules[0], "LEGACY"), "native snapshot accepts legacy single-pattern policies");
         }
     }
 
